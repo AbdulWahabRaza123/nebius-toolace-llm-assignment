@@ -1,0 +1,15 @@
+dataset_id: Team-ACE/ToolACE
+split: train
+output_dir: data/processed
+val_ratio: 0.05
+seed: 42
+max_seq_length: 8192
+min_turns: 2
+drop_if_truncated: true
+base_model: meta-llama/Llama-3.1-8B-Instruct
+system_fallback: >
+  You are an expert in composing functions. You are given a question and a set of
+  possible functions. Based on the question, you will need to make one or more
+  function/tool calls to achieve the purpose. If none of the functions can be used,
+  point it out. If the given question lacks the parameters required by the function,
+  also point it out.

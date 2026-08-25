@@ -1,0 +1,9 @@
+base_url: http://127.0.0.1:8000/v1
+api_key: dummy
+model: llama-3.1-8b-toolace
+concurrencies: [1, 8, 16, 32]
+requests_per_concurrency: 32
+max_tokens: 128
+temperature: 0.0
+timeout_s: 120
+output_path: results/latency.json
