@@ -188,12 +188,18 @@ Assistant targets serialized as BFCL-style JSON arrays of `{"name","parameters"}
 | Qwen QLoRA | 0.4392 | Pipeline proof |
 | Broken ToolACE LoRA | 0.4111 | Invalid for BFCL (empty assistants) |
 
-### QLoRA (BFCL-aligned) — status at doc freeze
+### QLoRA (BFCL-aligned) — completed
 
-- Config: `configs/train_qlora.yaml` → `checkpoints/qlora_bfcl`
-- Purpose: same data/format as winning LoRA, lower memory / cost profile
-- **Status:** training in progress (~step 200/1342); mid-run `eval_loss ≈ 0.441`, mean token acc ≈ **88.8%**
-- *Final update slot:* train loss ___ / eval loss ___ / BFCL non-live ___ (fill when run completes)
+| Item | Value |
+| --- | --- |
+| Config | `configs/train_qlora.yaml` |
+| Output | `checkpoints/qlora_bfcl/final` |
+| Train loss | **0.3915** |
+| Eval loss | **0.3411** |
+| Mean token accuracy | **90.82%** |
+| Runtime | ~1h 51m (1342 steps, 2 epochs) |
+
+**Vs production LoRA:** LoRA reached eval loss **~0.330** / token acc **~91.1%**. QLoRA is very close on train metrics with a lower-memory 4-bit base — useful for cost/memory, but **LoRA remains the production pick** (already BFCL-proven at ~71% non-live/live). Optional follow-up: merge+BFCL QLoRA only if you want a side-by-side accuracy table.
 
 ---
 
@@ -288,7 +294,7 @@ Why it fits a FinTech FC agent on 1×H100 / Token Factory:
 | QLoRA (smoke) | Qwen2.5-7B | Pipeline validation; eval loss 0.439 | No — wrong backbone for final ship |
 | LoRA BF16 (broken targets) | ToolACE-8B | Trained OK, BFCL ~15–19% simple | No — silent format bug |
 | **LoRA BF16 (BFCL-aligned)** | ToolACE-8B | **Production pick**; BFCL ~71% non-live/live | **Yes** |
-| QLoRA BFCL-aligned | ToolACE-8B | Running for cost/memory comparison | Contender if GPU memory / $ tight |
+| QLoRA BFCL-aligned | ToolACE-8B | **Done** — train 0.3915 / eval 0.3411 / token acc 90.8% | Contender if GPU memory / $ tight; LoRA still preferred |
 | Full SFT | ToolACE-8B | Config ready; optional | Only if LoRA plateaus |
 
 **Most suitable today: BFCL-aligned LoRA BF16** — best measured quality, simple merge+serve path, meets latency without quant.
@@ -505,7 +511,7 @@ From laptop: `ssh -L 8000:127.0.0.1:8000 nebius-assignment@89.169.99.143` then s
 | Deliverable | Status |
 | --- | --- |
 | Fine-tune suitable model + explain choice | Done (Q1a) |
-| Experiment with multiple FT methods | LoRA done; Qwen QLoRA done; ToolACE QLoRA running; full SFT optional (Q1b) |
+| Experiment with multiple FT methods | Done — LoRA (prod) + Qwen QLoRA smoke + ToolACE QLoRA (Q1b) |
 | Best practices for quality | Done (Q1c) |
 | Reproducible train/eval/serve scripts | Done (Q1d) |
 | Report training + BFCL + latency | Done in REPORT + this document |
@@ -518,10 +524,11 @@ From laptop: `ssh -L 8000:127.0.0.1:8000 nebius-assignment@89.169.99.143` then s
 
 ## 15. Open items (honest close)
 
-1. **QLoRA BFCL-aligned** — in progress (~15% at step 200; mid-run eval_loss ≈ **0.441**, token acc ≈ **88.8%**); fill final numbers when complete  
+1. **QLoRA BFCL-aligned** — **done** (eval loss 0.341; optional BFCL compare vs LoRA if desired)  
 2. **Full SFT** — optional completeness on ToolACE-8B  
 3. **Meta Llama 3.1 Instruct base** — when gated access lands, true from-scratch vs ToolACE-8B A/B  
-4. **Cost optimization** — only after product accepts current quality (FP8 Dedicated Endpoint)
+4. **Cost optimization** — only after product accepts current quality (FP8 Dedicated Endpoint)  
+5. **Restart vLLM** — GPU free again; `bash scripts/04_serve_merged.sh` for curl smoke tests
 
 ---
 

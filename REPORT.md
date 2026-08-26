@@ -33,7 +33,7 @@ First LoRA run scored ~15–19% on BFCL because ToolACE-8B’s stripped chat tem
 | B | QLoRA r=16 α=32 (Qwen2.5-7B pipeline test) | **done** | 0.5168 | 0.4392 | ungated stack validation |
 | C | LoRA BF16 (ToolACE-8B, broken targets) | **done** | 0.4679 | 0.4111 | invalid for BFCL (empty assistants) |
 | D | LoRA BF16 BFCL-aligned (ToolACE-8B) | **done** | — | **0.3302** | production candidate; token acc ~91% |
-| E | QLoRA BFCL-aligned (ToolACE-8B) | **running** | — | — | method matrix vs LoRA → `checkpoints/qlora_bfcl` |
+| E | QLoRA BFCL-aligned (ToolACE-8B) | **done** | **0.3915** | **0.3411** | method matrix; token acc ~90.8%; `checkpoints/qlora_bfcl/final` |
 | F | Full SFT | pending | — | — | config ready (`train_full.yaml`); optional |
 
 Data prep (fixed): 11,300 → 11,294 converted → 10,730 train / 564 val; **9,174** rows with JSON assistant targets.
