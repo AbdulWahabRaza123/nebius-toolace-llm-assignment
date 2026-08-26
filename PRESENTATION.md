@@ -7,6 +7,8 @@
 
 This document is the **final narrative for the 15–20 minute demo**: what we built, why we chose it, what broke, what we fixed, and what we would ship.
 
+**Also includes full Assignment Q&A (Section 10)** answering every take-home task item (1a–1d, 2a–2c, deliverables), plus curl smoke tests (Section 12).
+
 ---
 
 ## 1. One-minute executive summary
@@ -190,8 +192,8 @@ Assistant targets serialized as BFCL-style JSON arrays of `{"name","parameters"}
 
 - Config: `configs/train_qlora.yaml` → `checkpoints/qlora_bfcl`
 - Purpose: same data/format as winning LoRA, lower memory / cost profile
-- **Status:** training in progress on VM; final loss + optional BFCL compare to be filled when complete
-- *Update slot:* train loss ___ / eval loss ___ / BFCL non-live ___ (fill after run)
+- **Status:** training in progress (~step 200/1342); mid-run `eval_loss ≈ 0.441`, mean token acc ≈ **88.8%**
+- *Final update slot:* train loss ___ / eval loss ___ / BFCL non-live ___ (fill when run completes)
 
 ---
 
@@ -260,16 +262,133 @@ Endpoint `http://127.0.0.1:8000/v1`, model `llama-3.1-8b-toolace`, 32 requests p
 
 ---
 
-## 10. Decisions & tradeoffs (demo Q&A ammo)
+## 10. Assignment Q&A (answer every brief item)
+
+Use this section verbatim in the demo if asked. Each item maps to the take-home text.
+
+### Task 1 — Fine-tuning & evaluation
+
+**Q1a. Which model did you fine-tune, and why is it most suitable for the client?**
+
+**A:** We fine-tuned **`Team-ACE/ToolACE-8B`** (Llama 3.1 8B Instruct lineage already specialized for ToolACE-style function calling).
+
+Why it fits a FinTech FC agent on 1×H100 / Token Factory:
+
+- Same backbone family as published ToolACE work → strong function-calling prior
+- **8B** is a practical Token Factory Dedicated Endpoint size (quality vs cost)
+- Fits LoRA / QLoRA / full SFT on **1×H100 80GB**
+- Intended Meta `Meta-Llama-3.1-8B-Instruct` was **HF-gated** and not downloadable in time; ToolACE-8B is the honest production substitute with the same architecture
+
+**Q1b. What fine-tuning methods did you try, and which is most suitable?**
+
+**A:** Method matrix:
+
+| Method | Backbone | Outcome | Suitable for client? |
+| --- | --- | --- | --- |
+| QLoRA (smoke) | Qwen2.5-7B | Pipeline validation; eval loss 0.439 | No — wrong backbone for final ship |
+| LoRA BF16 (broken targets) | ToolACE-8B | Trained OK, BFCL ~15–19% simple | No — silent format bug |
+| **LoRA BF16 (BFCL-aligned)** | ToolACE-8B | **Production pick**; BFCL ~71% non-live/live | **Yes** |
+| QLoRA BFCL-aligned | ToolACE-8B | Running for cost/memory comparison | Contender if GPU memory / $ tight |
+| Full SFT | ToolACE-8B | Config ready; optional | Only if LoRA plateaus |
+
+**Most suitable today: BFCL-aligned LoRA BF16** — best measured quality, simple merge+serve path, meets latency without quant.
+
+**Q1c. What best practices did you apply for quality (without endless HPO)?**
+
+**A:**
+
+1. Official ToolACE + official BFCL Python harness (no toy data)
+2. **Train ↔ eval contract alignment** (BFCL Llama-3.1-FC JSON `{"name","parameters"}` + matching prompt render)
+3. Diagnosed empty generations (~71% empty on simple_python) instead of blind retraining
+4. Patched broken ToolACE-8B chat template / `tool_calls` handling
+5. Assistant-target validation; longer serve context (`max_model_len=32768`)
+6. Seeded configs, reproducible scripts, merge LoRA before production serve
+7. Prioritized accuracy over premature quantization
+
+**Q1d. Where are reproducible scripts and metrics for all models?**
+
+**A:**
+
+- Code: private GitHub `nebius-toolace-llm-assignment` (`src/`, `scripts/`, `configs/`)
+- Metrics: [REPORT.md](REPORT.md) + this document
+- One-shot path: `bash scripts/06_fix_accuracy_pipeline.sh`
+- Train: `python src/train/sft.py --config configs/train_{lora,qlora,full}.yaml`
+- Eval: `bash scripts/05_run_bfcl.sh`
+- Bench: `python src/bench/latency.py --config configs/bench.yaml`
+
+### Task 2 — Optimization, deployment & benchmarking
+
+**Q2a. How did you optimize throughput / latency?**
+
+**A:**
+
+- Serve with **vLLM** (continuous batching, PagedAttention)
+- **BF16** (no accuracy hit from low-bit quant)
+- **Prefix caching** enabled
+- `max_num_seqs=64`, `gpu_memory_utilization=0.92`
+- Merged LoRA into a single HF checkpoint (no runtime adapter overhead)
+- Native tool parser `llama3_json`
+
+We did **not** quantize: accuracy is first priority and BF16 already meets the concurrency SLA.
+
+**Q2b. How did you deploy for production (Token Factory), and what are BFCL Python results?**
+
+**A — Deployment (Token Factory analogue):**
+
+| PoC | Token Factory production |
+| --- | --- |
+| Merged weights on disk | Upload to Custom Weights Hub |
+| `vllm serve` on 1×H100 | Dedicated Endpoint, 1 GPU/replica |
+| OpenAI `/v1/chat/completions` + tools | Same client contract |
+
+Serve script: `bash scripts/04_serve_merged.sh` → model id `llama-3.1-8b-toolace` on port **8000**.
+
+**A — BFCL Python (fixed production model):**
+
+- Non-live overall **71.06%** | Live overall **70.98%**
+- Simple AST **66.75%** | Multiple **87%** | Parallel **91%** | Parallel Multiple **84%**
+- Do not lead with aggregate Overall Acc **22.94%** (diluted by out-of-scope categories e.g. multi-turn)
+
+**Q2c. 16–32 concurrent — TTFT and latency?**
+
+**A:** Measured on the deployed merged LoRA (tool-calling prompts, 32 reqs/level):
+
+| Concurrency | TTFT p95 | E2E p95 | RPS |
+| --- | --- | --- | --- |
+| 16 | **85 ms** | **229 ms** | 67.6 |
+| 32 | **111 ms** | **262 ms** | 114 |
+
+Errors: **0**. Client concurrency target is met in BF16.
+
+### Deliverables & process questions
+
+**Q. What do you ship as deliverables?**
+
+**A:** Training / eval / deploy code; reported train + BFCL + latency metrics; model choice explanation — all in GitHub + `PRESENTATION.md` / `REPORT.md`.
+
+**Q. Did you quantize?**
+
+**A:** No. Scripts/path exist conceptually for later FP8; skipped because BF16 already hits latency/throughput and accuracy ranks first. We would introduce FP8 only after product accepts current quality and wants lower $/token.
+
+**Q. Why was the first BFCL score so low if training loss looked fine?**
+
+**A:** ToolACE-8B chat template dropped `tool_calls` → empty SFT targets → model learned to stop. Loss can look healthy while eval format is wrong. Fixing alignment lifted simple AST from ~19.5% → **66.75%** and non-live/live to ~**71%**.
+
+**Q. What would you tell the FinTech client as next steps?**
+
+**A:** Ship LoRA merged endpoint now; A/B Meta base when gated access lands; finish QLoRA comparison for cost; add FP8 if cost becomes priority; monitor live tool schema drift.
+
+### Extra demo Q&A (likely interviewer follow-ups)
 
 | Question | Answer |
 | --- | --- |
-| Why not Meta Llama base? | Gated HF access not granted in time; ToolACE-8B is same architecture and stronger FC starting point |
-| Why LoRA over QLoRA? | LoRA BF16 is production pick today; QLoRA is the cost/memory comparison run |
-| Why no FP8/INT4? | Accuracy first; latency already OK at 16–32 concurrency |
-| Why is Overall Acc low? | Aggregate includes out-of-scope categories; report Python non-live/live AST |
-| Biggest quality unlock? | Align ToolACE SFT targets to BFCL Llama-3.1-FC JSON + prompt layout |
-| What would you do next with the client? | Meta base A/B, full SFT if quality plateau, then FP8 for $ / GPU density |
+| Why Llama/ToolACE-8B not a 70B? | 1×H100 budget; Token Factory cost; 8B enough when format-aligned |
+| LoRA vs full SFT? | LoRA wins on iterate/serve simplicity; full SFT only if quality plateaus |
+| How do you know BFCL is the right proxy? | Assignment-mandated Python subset; mirrors tool-call correctness |
+| Live vs non-live gap? | Live is harder / noisier; we still ~71% overall live |
+| Security for FinTech APIs? | AuthZ outside the LLM; allowlisted tools; schema validation; never trust raw generations |
+| Observability? | Log tool names/args, TTFT, error rates; canary new adapters |
+| How to promote to Token Factory? | Upload `merged-lora-bfcl` → Dedicated Endpoint → same OpenAI client |
 
 ---
 
@@ -304,7 +423,69 @@ Artifacts **not** in git (by design): weights, processed data, `.env`, raw `resu
 
 ---
 
-## 12. Suggested 15–20 minute demo arc
+## 12. Curl smoke tests (after vLLM is up)
+
+Start serve (only when GPU is free — after QLoRA finishes):
+
+```bash
+bash scripts/04_serve_merged.sh
+```
+
+**List models**
+```bash
+curl -s http://127.0.0.1:8000/v1/models | jq .
+```
+
+**Plain chat**
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.1-8b-toolace",
+    "temperature": 0,
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "What is 2+2? Reply briefly."}
+    ]
+  }' | jq .
+```
+
+**Tool calling (deployment test)**
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.1-8b-toolace",
+    "temperature": 0,
+    "max_tokens": 256,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {"type": "string"}
+            },
+            "required": ["city"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "messages": [
+      {"role": "user", "content": "What is the weather in Berlin right now?"}
+    ]
+  }' | jq .
+```
+
+From laptop: `ssh -L 8000:127.0.0.1:8000 nebius-assignment@89.169.99.143` then same curls to `http://127.0.0.1:8000`.
+
+---
+
+## 13. Suggested 15–20 minute demo arc
 
 | Min | Beat |
 | --- | --- |
@@ -315,35 +496,37 @@ Artifacts **not** in git (by design): weights, processed data, `.env`, raw `resu
 | 10–13 | Fixed results: ~71% non-live/live; multi/parallel AST |
 | 13–16 | Serve map to Token Factory; latency @ 16–32; why no quant |
 | 16–18 | Method matrix status (LoRA win; QLoRA comparison) |
-| 18–20 | Next steps + Q&A |
+| 18–20 | Assignment Q&A (Section 10) |
 
 ---
 
-## 13. Deliverables checklist vs assignment
+## 14. Deliverables checklist vs assignment
 
 | Deliverable | Status |
 | --- | --- |
-| Fine-tune suitable model + explain choice | Done |
-| Experiment with multiple FT methods | LoRA done; Qwen QLoRA done; ToolACE QLoRA running; full SFT optional |
-| Best practices for quality | Done (format alignment, FC render, longer context serve) |
-| Reproducible train/eval/serve scripts | Done in private GitHub |
+| Fine-tune suitable model + explain choice | Done (Q1a) |
+| Experiment with multiple FT methods | LoRA done; Qwen QLoRA done; ToolACE QLoRA running; full SFT optional (Q1b) |
+| Best practices for quality | Done (Q1c) |
+| Reproducible train/eval/serve scripts | Done (Q1d) |
 | Report training + BFCL + latency | Done in REPORT + this document |
-| Optimize inference | Done (vLLM, prefix cache, BF16, 32k context) |
-| Deploy production-style + BFCL Python | Done |
-| Measure TTFT/latency @ 16–32 concurrent | Done |
-| Quantization scripts | Not required given SLA; justified skip |
+| Optimize inference | Done (Q2a) |
+| Deploy production-style + BFCL Python | Done (Q2b) |
+| Measure TTFT/latency @ 16–32 concurrent | Done (Q2c) |
+| Quantization scripts | Justified skip — BF16 meets SLA |
 
 ---
 
-## 14. Open items (honest close)
+## 15. Open items (honest close)
 
-1. **QLoRA BFCL-aligned** — finish training; add metrics / optional BFCL compare to this doc  
+1. **QLoRA BFCL-aligned** — in progress (~15% at step 200; mid-run eval_loss ≈ **0.441**, token acc ≈ **88.8%**); fill final numbers when complete  
 2. **Full SFT** — optional completeness on ToolACE-8B  
 3. **Meta Llama 3.1 Instruct base** — when gated access lands, true from-scratch vs ToolACE-8B A/B  
 4. **Cost optimization** — only after product accepts current quality (FP8 Dedicated Endpoint)
 
 ---
 
-## 15. Bottom line for reviewers
+## 16. Bottom line for reviewers
 
 We did not chase leaderboard noise. We built a **shippable function-calling stack** on the assignment GPU, found a **silent training bug** that destroyed BFCL scores, fixed **train–eval contract alignment**, and showed that **BF16 LoRA + vLLM** already serves **16–32 concurrent** users with strong Python FC accuracy (~**71%** non-live / live). That is the Customer Solution Architect outcome: diagnose, fix, measure, map to Token Factory, and know what to do next.
+
+**For the presentation:** speak from Sections **1 → 5 → 8 → 9 → 10**; keep curls (Section **12**) for a live smoke demo after vLLM is restarted.
