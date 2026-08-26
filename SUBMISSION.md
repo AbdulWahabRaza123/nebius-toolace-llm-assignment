@@ -17,7 +17,8 @@ bash scripts/03_train.sh lora        # or: qlora / full
 # or one-shot: bash scripts/06_fix_accuracy_pipeline.sh
 ```
 
-See [README.md](README.md) for BFCL eval, vLLM serve, and latency bench. Full numbers and rationale: [REPORT.md](REPORT.md).
+See [README.md](README.md) for BFCL eval, vLLM serve, and latency bench.  
+**Presentation journey doc:** [PRESENTATION.md](PRESENTATION.md). Metrics: [REPORT.md](REPORT.md).
 
 ## Headline results (production candidate)
 
