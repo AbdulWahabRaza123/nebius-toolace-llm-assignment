@@ -1,8 +1,8 @@
 run_name: llama31-8b-toolace-full
 method: full
-base_model: models/llama-3.1-8b-instruct
+base_model: models/toolace-8b
 data_dir: data/processed
-output_dir: checkpoints/full
+output_dir: checkpoints/full_bfcl
 seed: 42
 max_seq_length: 4096
 num_train_epochs: 1
@@ -22,5 +22,5 @@ save_total_limit: 1
 bf16: true
 gradient_checkpointing: true
 packing: false
-assistant_only_loss: true
+assistant_only_loss: false
 lora: null
