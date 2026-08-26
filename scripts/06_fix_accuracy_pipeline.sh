@@ -80,6 +80,8 @@ nohup vllm serve checkpoints/merged-lora-bfcl \
   --gpu-memory-utilization 0.92 \
   --max-num-seqs 64 \
   --enable-prefix-caching \
+  --enable-auto-tool-choice \
+  --tool-call-parser llama3_json \
   > logs/vllm.log 2>&1 &
 
 for i in $(seq 1 90); do

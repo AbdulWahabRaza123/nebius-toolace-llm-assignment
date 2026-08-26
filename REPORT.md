@@ -60,16 +60,16 @@ Data prep (fixed): 11,300 → 11,294 converted → 10,730 train / 564 val; **9,1
 
 ## Latency (vLLM BF16, tool-calling prompts)
 
-Endpoint: `http://127.0.0.1:8000/v1`, model `llama-3.1-8b-toolace`, 32 requests per concurrency level, 0 errors.
+Endpoint: `http://127.0.0.1:8000/v1`, model `llama-3.1-8b-toolace` (`checkpoints/merged-lora-bfcl`), 32 requests per concurrency level, 0 errors.
 
 | Concurrency | TTFT p50 | TTFT p95 | TTFT p99 | E2E p50 | E2E p95 | RPS | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 14.6 ms | 16.1 ms | 48.0 ms | 243 ms | 245 ms | 4.1 | 0 |
-| 8 | 29.7 ms | 31.0 ms | 31.5 ms | 271 ms | 359 ms | 26.5 | 0 |
-| 16 | 42.3 ms | 44.4 ms | 45.5 ms | 284 ms | 289 ms | 49.8 | 0 |
-| 32 | 65.4 ms | 68.6 ms | 68.8 ms | 405 ms | 409 ms | 75.0 | 0 |
+| 1 | 57.2 ms | 57.3 ms | 88.9 ms | 193 ms | 193 ms | 5.1 | 0 |
+| 8 | 70.4 ms | 74.6 ms | 75.1 ms | 211 ms | 215 ms | 36.9 | 0 |
+| 16 | 82.7 ms | 85.0 ms | 88.9 ms | 227 ms | 229 ms | 67.6 | 0 |
+| 32 | 104 ms | 111 ms | 112 ms | 259 ms | 262 ms | 114 | 0 |
 
-**Verdict:** At the client’s **16–32 concurrent** target, TTFT stays under ~70 ms p95 and E2E under ~0.41 s p95 on 1×H100 BF16. No quantization needed for this SLA.
+**Verdict:** At the client’s **16–32 concurrent** target, TTFT stays ~85–111 ms p95 and E2E under ~0.26 s p95 on 1×H100 BF16. No quantization needed for this SLA.
 
 ## Token Factory mapping
 
