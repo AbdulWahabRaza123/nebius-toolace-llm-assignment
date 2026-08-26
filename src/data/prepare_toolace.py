@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Convert official Hugging Face Team-ACE/ToolACE into Llama 3.1 tool-call chats."""
+"""Convert Team-ACE/ToolACE into BFCL Llama-3.1-FC aligned training chats.
+
+BFCL's LlamaHandler_3_1 expects assistant outputs like:
+  {"name": "fn", "parameters": {...}}
+or a list / semicolon-separated list of those objects.
+ToolACE-8B's stripped chat template drops tool_calls, so we store the JSON
+as plain assistant content and render prompts with the same BFCL layout.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +22,13 @@ from typing import Any
 import yaml
 from datasets import Dataset, DatasetDict, load_dataset
 
-TOOL_ARRAY_RE = re.compile(r"\[\{.*\}\]\s*$", re.DOTALL)
 FUNC_CALL_RE = re.compile(r"^\[.*\]\s*$", re.DOTALL)
-NAME_ARGS_RE = re.compile(r"^(?P<name>[A-Za-z0-9_.]+)\((?P<args>.*)\)$", re.DOTALL)
+# ToolACE names often include spaces (e.g. "Market Trends API") or leading "/".
+NAME_ARGS_RE = re.compile(r"^(?P<name>[A-Za-z0-9_./\s-]+?)\((?P<args>.*)\)$", re.DOTALL)
+TOOLACE_EPILOGUE_RE = re.compile(
+    r"Should you decide to return the function call\(s\).*$",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -25,37 +36,77 @@ def load_config(path: Path) -> dict[str, Any]:
         return yaml.safe_load(handle)
 
 
+def find_json_array_span(text: str) -> tuple[int, int] | None:
+    """Find the first top-level JSON array span (handles trailing ToolACE prose)."""
+    start = text.find("[{")
+    if start < 0:
+        start = text.find("[")
+        if start < 0:
+            return None
+    depth = 0
+    in_str = False
+    escape = False
+    quote = ""
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_str = False
+            continue
+        if ch in {'"', "'"}:
+            in_str = True
+            quote = ch
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return start, i + 1
+    return None
+
+
 def extract_tools_and_system(system_text: str, fallback: str) -> tuple[str, list[dict[str, Any]]]:
     text = (system_text or "").strip()
-    match = TOOL_ARRAY_RE.search(text)
     tools: list[dict[str, Any]] = []
-    if match:
-        raw = match.group(0)
+    span = find_json_array_span(text)
+    if span:
+        start, end = span
+        raw = text[start:end]
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
-                tools = [normalize_tool(item) for item in parsed if isinstance(item, dict)]
+                tools = [normalize_tool_bfcl(item) for item in parsed if isinstance(item, dict)]
         except json.JSONDecodeError:
             tools = []
-        system_prompt = text[: match.start()].strip()
+        head = text[:start].strip()
+        tail = text[end:].strip()
+        tail = TOOLACE_EPILOGUE_RE.sub("", tail).strip()
+        system_prompt = "\n".join(p for p in (head, tail) if p).strip()
     else:
-        system_prompt = text
+        system_prompt = TOOLACE_EPILOGUE_RE.sub("", text).strip()
     if not system_prompt:
         system_prompt = fallback.strip()
+    # Keep system short; BFCL injects its own FC instructions in the user turn.
+    if len(system_prompt) > 1200:
+        system_prompt = system_prompt[:1200].rsplit(" ", 1)[0]
     return system_prompt, tools
 
 
-def normalize_tool(tool: dict[str, Any]) -> dict[str, Any]:
+def normalize_tool_bfcl(tool: dict[str, Any]) -> dict[str, Any]:
+    """BFCL Llama FC expects flat {name, description, parameters}."""
+    if "function" in tool and isinstance(tool["function"], dict):
+        tool = tool["function"]
     parameters = tool.get("parameters") or tool.get("input_schema") or {}
     parameters = rewrite_schema(parameters)
-    name = tool.get("name") or tool.get("tool_name") or "unknown"
     return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": tool.get("description") or "",
-            "parameters": parameters,
-        },
+        "name": tool.get("name") or tool.get("tool_name") or "unknown",
+        "description": tool.get("description") or "",
+        "parameters": parameters,
     }
 
 
@@ -151,14 +202,40 @@ def parse_one_call(chunk: str) -> dict[str, Any] | None:
                 arguments[key] = ast.literal_eval(value.strip())
             except (ValueError, SyntaxError):
                 arguments[key] = value.strip().strip("'\"")
-    return {
-        "id": f"call_{abs(hash(name + json.dumps(arguments, default=str))) % 10_000_000}",
-        "type": "function",
-        "function": {
-            "name": name,
-            "arguments": json.dumps(arguments, ensure_ascii=False),
-        },
-    }
+    return {"name": name, "parameters": arguments}
+
+
+def dumps_for_bfcl_eval(obj: Any) -> str:
+    """Serialize so BFCL's eval()-based decoder accepts bools/null."""
+
+    def _fmt(value: Any) -> str:
+        if value is None:
+            return "None"
+        if isinstance(value, bool):
+            return "True" if value else "False"
+        if isinstance(value, str):
+            return json.dumps(value, ensure_ascii=False)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return repr(value) if isinstance(value, int) else json.dumps(value)
+        if isinstance(value, list):
+            return "[" + ", ".join(_fmt(v) for v in value) + "]"
+        if isinstance(value, dict):
+            items = []
+            for k, v in value.items():
+                items.append(f"{json.dumps(str(k), ensure_ascii=False)}: {_fmt(v)}")
+            return "{" + ", ".join(items) + "}"
+        return json.dumps(value, ensure_ascii=False)
+
+    return _fmt(obj)
+
+
+def calls_to_assistant_content(calls: list[dict[str, Any]]) -> str:
+    if not calls:
+        return ""
+    if len(calls) == 1:
+        return dumps_for_bfcl_eval(calls[0])
+    # BFCL accepts a JSON list or semicolon-separated objects.
+    return dumps_for_bfcl_eval(calls)
 
 
 def convert_example(example: dict[str, Any], fallback: str) -> dict[str, Any] | None:
@@ -168,8 +245,8 @@ def convert_example(example: dict[str, Any], fallback: str) -> dict[str, Any] | 
         return None
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    pending_tool_ids: list[str] = []
     saw_assistant = False
+    saw_tool_call = False
 
     for turn in conversations:
         if not isinstance(turn, dict):
@@ -185,26 +262,29 @@ def convert_example(example: dict[str, Any], fallback: str) -> dict[str, Any] | 
             messages.append({"role": "user", "content": value})
         elif role in {"gpt", "assistant"}:
             calls = parse_call_list(value)
-            if calls:
-                pending_tool_ids = [call["id"] for call in calls]
-                messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+            if calls is not None:
+                if not calls:
+                    # Explicit empty call list → refusal / no-tool answer.
+                    content = "None of the functions can be used to answer this question."
+                else:
+                    content = calls_to_assistant_content(calls)
+                    saw_tool_call = True
+                messages.append({"role": "assistant", "content": content})
             else:
-                pending_tool_ids = []
-                messages.append({"role": "assistant", "content": value})
+                content = value.strip()
+                if not content:
+                    return None
+                messages.append({"role": "assistant", "content": content})
             saw_assistant = True
         elif role in {"tool", "function"}:
-            tool_call_id = pending_tool_ids.pop(0) if pending_tool_ids else f"call_{len(messages)}"
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": value,
-                }
-            )
+            messages.append({"role": "tool", "content": value})
         else:
             return None
 
     if not saw_assistant:
+        return None
+    # Drop rows where we expected tools but failed to extract any schema.
+    if saw_tool_call and not tools:
         return None
     return {"messages": messages, "tools": tools}
 
@@ -223,12 +303,20 @@ def main() -> int:
     raw = load_dataset(cfg["dataset_id"], split=cfg.get("split", "train"))
     converted: list[dict[str, Any]] = []
     dropped = 0
+    n_with_tools = 0
+    n_with_json_assistant = 0
     for example in raw:
         item = convert_example(example, fallback)
         if item is None:
             dropped += 1
             continue
         converted.append(item)
+        if item["tools"]:
+            n_with_tools += 1
+        for msg in item["messages"]:
+            if msg["role"] == "assistant" and '"name"' in (msg.get("content") or ""):
+                n_with_json_assistant += 1
+                break
 
     if not converted:
         print("No rows converted.", file=sys.stderr)
@@ -241,10 +329,17 @@ def main() -> int:
     val_rows = converted[:n_val]
     train_rows = converted[n_val:]
 
+    def flatten_row(row: dict[str, Any]) -> dict[str, str]:
+        # Serialize nested fields: tool schemas are heterogeneous and break Arrow.
+        return {
+            "messages_json": json.dumps(row["messages"], ensure_ascii=False),
+            "tools_json": json.dumps(row["tools"], ensure_ascii=False),
+        }
+
     dset = DatasetDict(
         {
-            "train": Dataset.from_list(train_rows),
-            "validation": Dataset.from_list(val_rows),
+            "train": Dataset.from_list([flatten_row(r) for r in train_rows]),
+            "validation": Dataset.from_list([flatten_row(r) for r in val_rows]),
         }
     )
     dset.save_to_disk(str(output_dir / "toolace_llama31"))
@@ -255,11 +350,21 @@ def main() -> int:
         "dropped": dropped,
         "train": len(train_rows),
         "validation": len(val_rows),
+        "rows_with_tools": n_with_tools,
+        "rows_with_json_assistant": n_with_json_assistant,
+        "format": "bfcl_llama31_fc_json",
     }
     (output_dir / "stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
     preview = converted[0]
     (output_dir / "preview.json").write_text(
-        json.dumps({"messages": preview["messages"][:6], "n_tools": len(preview["tools"])}, indent=2),
+        json.dumps(
+            {
+                "messages": preview["messages"][:6],
+                "n_tools": len(preview["tools"]),
+                "tool0": preview["tools"][0] if preview["tools"] else None,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     print(json.dumps(stats, indent=2))

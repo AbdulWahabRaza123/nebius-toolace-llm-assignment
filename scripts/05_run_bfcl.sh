@@ -22,5 +22,6 @@ bfcl generate \
   --num-gpus 1 \
   --allow-overwrite
 echo "BFCL evaluate"
-bfcl evaluate --model "$MODEL" --test-category "$CATEGORY"
+bfcl evaluate --model "$MODEL" --test-category "$CATEGORY" --partial-eval || \
+  bfcl evaluate --model "$MODEL" --test-category "$CATEGORY"
 echo DONE

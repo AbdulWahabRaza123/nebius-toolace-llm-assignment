@@ -1,6 +1,6 @@
 run_name: llama31-8b-toolace-qlora
 method: qlora
-base_model: models/llama-3.1-8b-instruct
+base_model: models/toolace-8b
 data_dir: data/processed
 output_dir: checkpoints/qlora
 seed: 42

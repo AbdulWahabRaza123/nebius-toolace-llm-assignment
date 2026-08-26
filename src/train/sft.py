@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune Llama 3.1 8B Instruct on prepared ToolACE data (LoRA / QLoRA / full SFT)."""
+"""Fine-tune on ToolACE with BFCL Llama-3.1-FC prompt/target alignment."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-# Nebius CUDA 13 layout — required for Triton to compile on first forward pass.
 _cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda-13.0")
 os.environ.setdefault("CUDA_HOME", _cuda_home)
 os.environ["PATH"] = f"{_cuda_home}/bin:" + os.environ.get("PATH", "")
@@ -28,15 +27,74 @@ def load_config(path: Path) -> dict[str, Any]:
         return yaml.safe_load(handle)
 
 
-def render_example(example: dict[str, Any], tokenizer: AutoTokenizer) -> dict[str, str]:
-    tools = example.get("tools") or None
-    text = tokenizer.apply_chat_template(
-        example["messages"],
-        tools=tools if tools else None,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    return {"text": text}
+def _load_messages_tools(example: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if "messages_json" in example:
+        messages = json.loads(example["messages_json"])
+        tools = json.loads(example.get("tools_json") or "[]")
+    else:
+        messages = list(example["messages"])
+        tools = example.get("tools") or []
+    return messages, tools
+
+
+def render_bfcl_llama31(example: dict[str, Any]) -> str:
+    """Match bfcl_eval LlamaHandler_3_1._format_prompt + gold assistant turns."""
+    messages, tools = _load_messages_tools(example)
+
+    system_message = ""
+    remaining = messages
+    if messages and messages[0].get("role") == "system":
+        system_message = (messages[0].get("content") or "").strip()
+        remaining = messages[1:]
+
+    parts: list[str] = ["<|begin_of_text|>"]
+    parts.append("<|start_header_id|>system<|end_header_id|>\n\n")
+    if tools:
+        parts.append("Environment: ipython\n")
+    parts.append("Cutting Knowledge Date: December 2023\n")
+    parts.append("Today Date: 26 Jul 2024\n\n")
+    parts.append(system_message)
+    parts.append("<|eot_id|>")
+
+    first_user = True
+    for message in remaining:
+        role = message.get("role")
+        content = (message.get("content") or "").strip()
+        if role == "user" and first_user:
+            first_user = False
+            parts.append("<|start_header_id|>user<|end_header_id|>\n\n")
+            if tools:
+                parts.append(
+                    "Given the following functions, please respond with a JSON for a function call "
+                    "with its proper arguments that best answers the given prompt.\n\n"
+                )
+                parts.append(
+                    'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.'
+                )
+                parts.append("Do not use variables.\n\n")
+                for func in tools:
+                    parts.append(json.dumps(func, indent=4))
+                    parts.append("\n\n")
+            parts.append(f"{content}<|eot_id|>")
+        elif role == "tool":
+            parts.append("<|start_header_id|>ipython<|end_header_id|>\n\n")
+            parts.append(content)
+            parts.append("<|eot_id|>")
+        elif role in {"assistant", "user", "system", "ipython"}:
+            parts.append(f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>")
+        else:
+            parts.append(f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>")
+
+    text = "".join(parts)
+    # Drop empty assistant targets (should be filtered in prepare; skip quietly in map).
+    if "<|start_header_id|>assistant<|end_header_id|>\n\n<|eot_id|>" in text:
+        return ""
+    return text
+
+
+def render_example(example: dict[str, Any], tokenizer: AutoTokenizer | None = None) -> dict[str, str]:
+    del tokenizer  # BFCL layout is hand-built; tokenizer chat_template is unreliable on ToolACE-8B.
+    return {"text": render_bfcl_llama31(example)}
 
 
 def build_model(cfg: dict[str, Any]):
@@ -103,16 +161,37 @@ def main() -> int:
     dset = load_from_disk(str(data_root))
     model, tokenizer, peft_config = build_model(cfg)
 
+    # Spot-check: at least some rendered rows must contain BFCL JSON tool calls.
+    json_hits = 0
+    for i in range(min(50, len(dset["train"]))):
+        sample = render_example(dset["train"][i])["text"]
+        if '"name"' in sample and '"parameters"' in sample:
+            json_hits += 1
+    if json_hits < 5:
+        raise SystemExit(f"Train render sanity failed: only {json_hits}/50 rows have BFCL JSON targets")
+
     train = dset["train"].map(
-        lambda row: render_example(row, tokenizer),
+        lambda row: render_example(row),
         remove_columns=dset["train"].column_names,
-        desc="render-train",
+        desc="render-train-bfcl",
     )
     val = dset["validation"].map(
-        lambda row: render_example(row, tokenizer),
+        lambda row: render_example(row),
         remove_columns=dset["validation"].column_names,
-        desc="render-val",
+        desc="render-val-bfcl",
     )
+    train = train.filter(lambda row: bool(row["text"]))
+    val = val.filter(lambda row: bool(row["text"]))
+
+    # Extra guard: reject empty assistant blocks at dataset scale.
+    empty = sum(
+        1
+        for t in train["text"][:200]
+        if "<|start_header_id|>assistant<|end_header_id|>\n\n<|eot_id|>" in t
+    )
+    if empty:
+        raise SystemExit(f"Found {empty}/200 empty assistant targets — aborting train")
+    print(f"Rendered train={len(train)} val={len(val)} json_hits_in_50={json_hits}")
 
     output_dir = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)

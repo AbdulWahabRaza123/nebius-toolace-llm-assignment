@@ -13,11 +13,15 @@ Assignment: FinTech function-calling agent on ToolACE, evaluated on BFCL Python,
 | Backbone used | `Team-ACE/ToolACE-8B` (Llama 3.1 8B Instruct fine-tuned with ToolACE; Meta base gated pending approval) |
 | Train data | Hugging Face `Team-ACE/ToolACE` |
 | Eval | GitHub `ShishirPatil/gorilla` BFCL (`--test-category python`) |
-| Serve | vLLM OpenAI API, merged LoRA BF16, tool parser `llama3_json` |
+| Serve | vLLM OpenAI API, merged BFCL-aligned LoRA BF16, `max_model_len=32768` |
 
 ## Model choice
 
-Llama 3.1 8B Instruct is the intended backbone (matches published ToolACE-8B, Token Factory support, fits LoRA/QLoRA/full SFT + 16–32 concurrent on 1xH100). Meta HF gated access was not yet granted for `meta-llama/Meta-Llama-3.1-8B-Instruct`, so production experiments used **ToolACE-8B** (same architecture) + additional LoRA on ToolACE. Quantization was **not** applied: BF16 already meets 16–32 concurrent latency targets (accuracy > latency > cost).
+Llama 3.1 8B Instruct is the intended backbone (matches published ToolACE-8B, Token Factory support, fits LoRA/QLoRA/full SFT + 16–32 concurrent on 1xH100). Meta HF gated access was not yet granted for `meta-llama/Meta-Llama-3.1-8B-Instruct`, so production experiments used **ToolACE-8B** (same architecture) + LoRA. Quantization was **not** applied: BF16 already meets 16–32 concurrent latency targets (accuracy > latency > cost).
+
+## Critical accuracy fix
+
+First LoRA run scored ~15–19% on BFCL because ToolACE-8B’s stripped chat template dropped `tool_calls`, so ~71% of simple_python outputs were empty EOS. Fix: re-prep ToolACE into BFCL Llama-3.1-FC JSON targets (`{"name","parameters"}`), render with BFCL’s prompt layout, retrain LoRA → `checkpoints/lora_bfcl` → `checkpoints/merged-lora-bfcl`.
 
 ## Training status
 
@@ -25,32 +29,34 @@ Llama 3.1 8B Instruct is the intended backbone (matches published ToolACE-8B, To
 | --- | --- | --- | --- | --- | --- |
 | A | Base (no FT) | pending | — | — | blocked on Meta gated base |
 | B | QLoRA r=16 α=32 (Qwen2.5-7B pipeline test) | **done** | 0.5168 | 0.4392 | ungated stack validation |
-| C | LoRA BF16 r=16 α=32 (ToolACE-8B) | **done** | 0.4679 | 0.4111 | production candidate |
-| D | Full SFT | pending | — | — | optional if GPU time remains |
+| C | LoRA BF16 (ToolACE-8B, broken targets) | **done** | 0.4679 | 0.4111 | invalid for BFCL (empty assistants) |
+| D | LoRA BF16 BFCL-aligned (ToolACE-8B) | **done** | — | **0.3302** | production candidate; token acc ~91% |
+| E | QLoRA / Full SFT | skipped | — | — | stopped broken QLoRA; optional follow-up |
 
-Data prep: 11,300 ToolACE rows → 10,735 train / 565 val.
+Data prep (fixed): 11,300 → 11,294 converted → 10,730 train / 564 val; **9,174** rows with JSON assistant targets.
 
-## BFCL (Python group, FC mode)
+## BFCL (Python group, FC mode) — fixed model
 
 - Harness commit: `6ea57973c7a6097fd7c5915698c54c17c5b1b6c8`
-- Model id: `meta-llama/Llama-3.1-8B-Instruct-FC` → served merged LoRA weights
-- Partial eval (1 long live_irrelevance case exceeded 8k context during generate)
+- Model id: `meta-llama/Llama-3.1-8B-Instruct-FC` → served `checkpoints/merged-lora-bfcl`
+- Context: `max_model_len=32768`
 
-| Slice | Accuracy |
-| --- | --- |
-| Overall (BFCL aggregate for run) | **15.49%** |
-| Non-live overall | **18.45%** |
-| Python Simple AST | **18.75%** |
-| Multiple AST | **38.50%** |
-| Parallel AST | **18.00%** |
-| Parallel Multiple AST | **11.06%** |
-| Irrelevance (non-live) | **97.50%** |
-| Live overall | **40.71%** |
-| Live Simple | **41.09%** |
-| Live Multiple | **41.79%** |
-| Relevance / Irrelevance (live) | 50.00% / 93.88% |
+| Slice | Before (broken LoRA) | After (BFCL-aligned LoRA) |
+| --- | --- | --- |
+| Overall (BFCL aggregate) | 15.52% | **22.94%** |
+| Non-live overall | 18.75% | **71.06%** |
+| Python Simple AST | 19.50% | **66.75%** |
+| Multiple AST | 38.50% | **87.00%** |
+| Parallel AST | 19.00% | **91.00%** |
+| Parallel Multiple AST | 11.00% | **84.00%** |
+| Irrelevance (non-live) | 97.50% | **97.92%** |
+| Live overall | 40.86% | **70.98%** |
+| Live Simple | 41.47% | **61.24%** |
+| Live Multiple | 41.79% | **73.88%** |
+| Live Parallel / Parallel Multiple | 18.75% / 8.33% | **68.75% / 50.00%** |
+| Relevance / Irrelevance (live) | 50.00% / 93.67% | **87.50% / 76.70%** |
 
-**Interpretation:** Strong refusal/irrelevance behavior; AST tool-call match under FC handler is weaker than expected for ToolACE-8B lineage. Likely causes: (1) FC native tool schema vs ToolACE chat/tool formatting used in SFT, (2) 8k context truncation on a few long cases. Next accuracy step: re-eval in prompt mode and/or align training to BFCL FC JSON schema, then re-run with `max_model_len>=32k`.
+**Interpretation:** Format alignment was the dominant quality lever. Non-live AST jumped from ~19% simple / ~19–38% multi/parallel to **67–91%**. Aggregate “Overall Acc” stays lower because BFCL V4 overall also weights categories outside the Python-focused slices (e.g. multi-turn 0%). For the assignment’s Python subset, the meaningful headline numbers are **non-live 71.06%** and **live 70.98%**.
 
 ## Latency (vLLM BF16, tool-calling prompts)
 
@@ -77,15 +83,15 @@ Endpoint: `http://127.0.0.1:8000/v1`, model `llama-3.1-8b-toolace`, 32 requests 
 ## Commands used
 
 ```bash
-# merge + serve
-python src/train/merge_lora.py --base-model models/toolace-8b --adapter checkpoints/lora/final --output checkpoints/merged-lora
+# accuracy fix pipeline (re-prep + LoRA + merge + serve + BFCL)
+bash scripts/06_fix_accuracy_pipeline.sh
+
+# or stepwise
+python src/data/prepare_toolace.py --config configs/data.yaml
+python src/train/sft.py --config configs/train_lora.yaml
+python src/train/merge_lora.py --base-model models/toolace-8b --adapter checkpoints/lora_bfcl/final --output checkpoints/merged-lora-bfcl
 bash scripts/04_serve_merged.sh
-
-# BFCL python
 bash scripts/05_run_bfcl.sh
-bfcl evaluate --model meta-llama/Llama-3.1-8B-Instruct-FC --test-category python --partial-eval
-
-# latency
 python src/bench/latency.py --config configs/bench.yaml
 ```
 
@@ -93,9 +99,9 @@ python src/bench/latency.py --config configs/bench.yaml
 
 1. Client problem: precise internal API calls; accuracy then latency then cost.
 2. Why 8B / ToolACE-8B on 1xH100 / Token Factory.
-3. ToolACE → chat+tools formatting; LoRA recipe.
-4. Training table (Qwen QLoRA + ToolACE-8B LoRA).
-5. BFCL Python scores + format/context caveats.
-6. vLLM ≈ Dedicated Endpoint; merge vs live LoRA.
-7. Concurrency 16–32 TTFT/E2E; why no quantization.
-8. Next: Meta base access, FC-format alignment, optional full SFT / FP8.
+3. Failure mode found: empty FC targets from broken chat template → ~15% BFCL.
+4. Fix: BFCL Llama-3.1-FC JSON alignment + retrain.
+5. Results: non-live **71%**, live **71%**, simple Python **67%** (was ~19%).
+6. vLLM ≈ Dedicated Endpoint; BF16 meets 16–32 concurrent (no quant needed).
+7. Latency table (TTFT/E2E @ 1/8/16/32).
+8. Next: Meta base when gated access lands; optional QLoRA/full SFT / FP8 for cost.
