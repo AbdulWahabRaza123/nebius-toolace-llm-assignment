@@ -24,7 +24,7 @@ Llama 3.1 8B Instruct is the primary backbone because it matches published ToolA
 | --- | --- | --- | --- | --- | --- |
 | A | Base (no FT) | pending | — | — | pending |
 | B | QLoRA r=16 α=32 (Qwen2.5-7B pipeline test) | **done** | 0.5168 | 0.4392 | pending |
-| C | LoRA BF16 r=16 α=32 (ToolACE-8B backbone) | **in progress** | — | — | pending |
+| C | LoRA BF16 r=16 α=32 (ToolACE-8B backbone) | **done** | 0.4679 | 0.4111 | pending |
 | D | Full SFT | pending | — | — | pending |
 
 Data prep: 11,300 ToolACE rows → 10,735 train / 565 val (`data/processed/toolace_llama31` on VM).
