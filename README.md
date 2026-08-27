@@ -5,6 +5,7 @@ End-to-end take-home: fine-tune an 8B function-calling model on Hugging Face **T
 **Where things run:** this laptop holds git/scripts. Training, downloads, and GPU inference run on the Nebius **1×H100** VM (`nebius-assignment@89.169.99.143`).
 
 **Demo / journey document (use this for the presentation):** [PRESENTATION.md](PRESENTATION.md)  
+**Code-level clone → run map:** [CODE_GUIDE.md](CODE_GUIDE.md)  
 Metrics sheet: [REPORT.md](REPORT.md). Reviewer clone notes: [SUBMISSION.md](SUBMISSION.md).
 
 ## Official sources
